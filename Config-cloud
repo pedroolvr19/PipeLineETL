@@ -1,0 +1,51 @@
+
+PROJECT_ID="ecommerce-etl-project"
+REGION="us-central1"
+STORAGE_CLASS="STANDARD"
+INSTANCE_NAME="ecommerce-etl-project"
+DB_NAME="ecommerce_db"
+DB_USER="postgres"
+DB_PASSWORD="123456"
+DATASET_ID="ecommerce_analytics"
+
+
+echo "Criando buckets no Cloud Storage..."
+gsutil mb -l $REGION -c $STORAGE_CLASS gs://$PROJECT_ID-raw-data
+gsutil mb -l $REGION -c $STORAGE_CLASS gs://$PROJECT_ID-processed-data
+
+
+echo "Criando instância PostgreSQL no Cloud SQL..."
+gcloud sql instances create $INSTANCE_NAME \
+    --database-version=POSTGRES_13 \
+    --cpu=1 \
+    --memory=3840MB \
+    --region=$REGION \
+    --root-password=$DB_PASSWORD
+
+
+echo "Criando banco de dados..."
+gcloud sql databases create $DB_NAME --instance=$INSTANCE_NAME
+
+
+echo "Configurando usuário..."
+gcloud sql users set-password postgres \
+    --instance=$INSTANCE_NAME \
+    --password=$DB_PASSWORD
+
+
+echo "Criando dataset no BigQuery..."
+bq --location=$REGION mk \
+    --dataset \
+    --description "Dataset para análise de dados de e-commerce" \
+    $PROJECT_ID:$DATASET_ID
+
+
+echo "Habilitando APIs necessárias..."
+gcloud services enable cloudfunctions.googleapis.com
+gcloud services enable cloudscheduler.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable storage-api.googleapis.com
+gcloud services enable bigquery.googleapis.com
+gcloud services enable sqladmin.googleapis.com
+
+echo "Configuração do ambiente GCP concluída!"
