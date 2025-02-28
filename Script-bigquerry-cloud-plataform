@@ -1,0 +1,129 @@
+import pandas as pd
+import numpy as np
+from google.cloud import storage
+from google.cloud import bigquery
+import datetime
+import io
+import os
+
+def etl_process(event, context):
+  
+
+    print(f"Iniciando processo ETL: {datetime.datetime.now()}")
+    
+
+    storage_client = storage.Client()
+    bigquery_client = bigquery.Client()
+ 
+    raw_bucket_name = "ecommerce-raw-data"
+    processed_bucket_name = "ecommerce-processed-data"
+    
+  
+    dataset_id = "ecommerce_analytics"
+    
+   
+    orders_data = load_data_from_storage(storage_client, raw_bucket_name, "olist_orders_dataset.csv")
+    
+    
+    orders_data['order_purchase_timestamp'] = pd.to_datetime(orders_data['order_purchase_timestamp'], errors='coerce')
+    orders_data['order_approved_at'] = pd.to_datetime(orders_data['order_approved_at'], errors='coerce')
+    orders_data['order_delivered_carrier_date'] = pd.to_datetime(orders_data['order_delivered_carrier_date'], errors='coerce')
+    orders_data['order_delivered_customer_date'] = pd.to_datetime(orders_data['order_delivered_customer_date'], errors='coerce')
+    orders_data['order_estimated_delivery_date'] = pd.to_datetime(orders_data['order_estimated_delivery_date'], errors='coerce')
+    
+    
+    delivered_orders = orders_data[orders_data['order_status'] == 'delivered']
+    
+   
+    order_items_data = load_data_from_storage(storage_client, raw_bucket_name, "olist_order_items_dataset.csv")
+    
+
+    products_data = load_data_from_storage(storage_client, raw_bucket_name, "olist_products_dataset.csv")
+    
+    customers_data = load_data_from_storage(storage_client, raw_bucket_name, "olist_customers_dataset.csv")
+  
+    sellers_data = load_data_from_storage(storage_client, raw_bucket_name, "olist_sellers_dataset.csv")
+    
+   
+    order_items_data['total_amount'] = order_items_data['price'] + order_items_data['freight_value']
+    total_revenue = order_items_data.groupby('order_id')['total_amount'].sum().reset_index()
+    total_revenue = total_revenue.merge(orders_data[['order_id', 'order_purchase_timestamp']], on='order_id', how='left')
+    
+   
+    total_revenue['purchase_year'] = total_revenue['order_purchase_timestamp'].dt.year
+    total_revenue['purchase_month'] = total_revenue['order_purchase_timestamp'].dt.month
+    total_revenue['purchase_day'] = total_revenue['order_purchase_timestamp'].dt.day
+    
+ 
+    orders_with_customer = orders_data.merge(customers_data, on='customer_id', how='left')
+    sales_by_region = order_items_data.merge(orders_with_customer[['order_id', 'customer_state']], on='order_id', how='left')
+    
+  
+    sales_by_region_agg = sales_by_region.groupby('customer_state')['total_amount'].agg(['sum', 'count']).reset_index()
+    sales_by_region_agg.columns = ['state', 'total_revenue', 'order_count']
+    
+   
+    sales_by_product = order_items_data.merge(products_data[['product_id', 'product_category_name']], on='product_id', how='left')
+    
+   
+    sales_by_category = sales_by_product.groupby('product_category_name')['total_amount'].agg(['sum', 'count']).reset_index()
+    sales_by_category.columns = ['category', 'total_revenue', 'item_count']
+    
+   
+    save_data_to_storage(storage_client, processed_bucket_name, "total_revenue.csv", total_revenue)
+    save_data_to_storage(storage_client, processed_bucket_name, "sales_by_region.csv", sales_by_region_agg)
+    save_data_to_storage(storage_client, processed_bucket_name, "sales_by_category.csv", sales_by_category)
+    
+   
+    load_to_bigquery(bigquery_client, dataset_id, "total_revenue", total_revenue)
+    load_to_bigquery(bigquery_client, dataset_id, "sales_by_region", sales_by_region_agg)
+    load_to_bigquery(bigquery_client, dataset_id, "sales_by_category", sales_by_category)
+    
+    print(f"Processo ETL concluído: {datetime.datetime.now()}")
+    return "ETL completed successfully"
+
+def load_data_from_storage(storage_client, bucket_name, blob_name):
+  
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    content = blob.download_as_string()
+    
+  
+    df = pd.read_csv(io.BytesIO(content))
+    return df
+
+def save_data_to_storage(storage_client, bucket_name, blob_name, dataframe):
+    
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    
+ 
+    csv_data = dataframe.to_csv(index=False)
+    blob.upload_from_string(csv_data, content_type='text/csv')
+    print(f"Arquivo {blob_name} salvo no bucket {bucket_name}")
+
+def load_to_bigquery(client, dataset_id, table_id, dataframe):
+  
+    table_ref = f"{client.project}.{dataset_id}.{table_id}"
+    
+  
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        source_format=bigquery.SourceFormat.CSV,
+        autodetect=True
+    )
+    
+   
+    dataframe_json = dataframe.to_json(orient='records', lines=True)
+    dataframe_bytes = io.StringIO(dataframe_json).read().encode()
+    
+   
+    job = client.load_table_from_file(
+        io.BytesIO(dataframe_bytes),
+        table_ref,
+        job_config=job_config
+    )
+    
+   
+    job.result()
+    print(f"Dados carregados para a tabela {table_id} no BigQuery")
